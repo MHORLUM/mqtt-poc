@@ -22,13 +22,17 @@ func main() {
 	clientID := uuid.New().String()[:8] // สร้าง ID แบบสุ่ม
 	fmt.Printf("Starting client [%s]\n", clientID)
 
-	opts := MQTT.NewClientOptions().AddBroker("tcp://broker.emqx.io:1883")
+	opts := MQTT.NewClientOptions().AddBroker("tcp://localhost:1883")
 	opts.SetClientID(clientID)
+
+	opts.SetWill("clients/disconnected", clientID, 0, false)
 
 	client := MQTT.NewClient(opts)
 	if token := client.Connect(); token.Wait() && token.Error() != nil {
 		panic(token.Error())
 	}
+
+	sendUpdate(client, clientID)
 
 	// ส่งข้อมูลทุกๆ สุ่มระหว่าง 3-7 วินาที
 	ticker := time.NewTicker(time.Duration(3+rand.Intn(5)) * time.Second)
