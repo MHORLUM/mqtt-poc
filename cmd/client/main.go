@@ -112,7 +112,7 @@ func onFileChunk(client MQTT.Client, msg MQTT.Message) {
 }
 
 func onFileEnd(client MQTT.Client, msg MQTT.Message) {
-	filePath := filepath.Join("received_" + fileName)
+	filePath := filepath.Join("files/received_" + fileName)
 	f, err := os.Create(filePath)
 	if err != nil {
 		fmt.Printf("Error creating file: %v\n", err)
