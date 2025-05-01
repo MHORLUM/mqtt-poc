@@ -2,6 +2,8 @@ package main
 
 import (
 	"bufio"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -20,9 +22,18 @@ type ClientStatus struct {
 	Timestamp string `json:"timestamp"`
 }
 
+type FileAck struct {
+	ClientID string `json:"client_id"`
+	Filename string `json:"filename"`
+	SHA256   string `json:"sha256"`
+}
+
 var (
-	clients   = make(map[string]string)
-	clientsMu sync.RWMutex
+	clients      = make(map[string]string)
+	clientsMu    sync.RWMutex
+	pendingAcks  = make(map[string]string)
+	acksReceived = make(map[string]string)
+	acksMu       sync.Mutex
 )
 
 const InactiveThreshold = 10 * time.Second
@@ -58,6 +69,9 @@ func main() {
 	if token := client.Subscribe("clients/disconnected", 0, handleDisconnect); token.Wait() && token.Error() != nil {
 		panic(token.Error())
 	}
+	if token := client.Subscribe("clients/ack", 0, handleAck); token.Wait() && token.Error() != nil {
+		panic(token.Error())
+	}
 
 	fmt.Println("Server started. Commands: list, get [client_id], upload [file]")
 	startCLI(client)
@@ -80,6 +94,27 @@ func handleDisconnect(_ MQTT.Client, msg MQTT.Message) {
 	delete(clients, clientID)
 	clientsMu.Unlock()
 	fmt.Printf("Client %s disconnected\n", clientID)
+}
+
+func handleAck(_ MQTT.Client, msg MQTT.Message) {
+	var ack FileAck
+	if err := json.Unmarshal(msg.Payload(), &ack); err != nil {
+		fmt.Printf("Invalid ACK: %v\n", err)
+		return
+	}
+
+	acksMu.Lock()
+	acksReceived[ack.ClientID] = ack.SHA256
+	expected, exists := pendingAcks[ack.ClientID]
+	acksMu.Unlock()
+
+	if exists {
+		if ack.SHA256 == expected {
+			fmt.Printf("ACK verified from [%s] ✅\n", ack.ClientID)
+		} else {
+			fmt.Printf("Checksum mismatch from [%s] ❌\n", ack.ClientID)
+		}
+	}
 }
 
 func startCLI(mqttClient MQTT.Client) {
@@ -157,13 +192,29 @@ func sendFileToAllClients(mqttClient MQTT.Client, filePath string) {
 	}
 
 	filename := filepath.Base(filePath)
+	sum := sha256.Sum256(data)
+	checksum := hex.EncodeToString(sum[:])
 	totalChunks := (len(data) + ChunkSize - 1) / ChunkSize
+
 	clientsMu.RLock()
 	defer clientsMu.RUnlock()
+
+	acksMu.Lock()
+	pendingAcks = make(map[string]string)
+	acksMu.Unlock()
+
+	fmt.Printf("Uploading %s (%d chunks) to %d clients...\n", filename, totalChunks, len(clients))
 	for clientID := range clients {
+		fmt.Printf("Sending to [%s]...\n", clientID)
+
+		acksMu.Lock()
+		pendingAcks[clientID] = checksum
+		acksMu.Unlock()
+
 		meta := map[string]interface{}{
 			"filename":     filename,
 			"total_chunks": totalChunks,
+			"sha256":       checksum,
 		}
 		payload, _ := json.Marshal(meta)
 		mqttClient.Publish(fmt.Sprintf("file/send/%s/start", clientID), 0, false, payload)
@@ -180,6 +231,7 @@ func sendFileToAllClients(mqttClient MQTT.Client, filePath string) {
 			time.Sleep(50 * time.Millisecond)
 		}
 		mqttClient.Publish(fmt.Sprintf("file/send/%s/end", clientID), 0, false, []byte("done"))
-		fmt.Printf("File sent to %s\n", clientID)
+		fmt.Printf("Finished sending to [%s]\n", clientID)
 	}
+	fmt.Println("Upload complete. Waiting for ACKs...")
 }

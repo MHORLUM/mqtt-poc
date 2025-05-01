@@ -24,11 +24,12 @@ type ClientStatus struct {
 }
 
 var (
-	tmpChunks   = make(map[int][]byte)
-	totalChunks int
-	fileName    string
-	mqttClient  MQTT.Client
-	clientID    string
+	tmpChunks    = make(map[int][]byte)
+	totalChunks  int
+	fileName     string
+	expectedHash string
+	mqttClient   MQTT.Client
+	clientID     string
 )
 
 func main() {
@@ -72,7 +73,6 @@ func sendUpdate(client MQTT.Client, clientID string) {
 		ClientID:  clientID,
 		Timestamp: time.Now().Format(time.RFC3339),
 	}
-
 	payload, _ := json.Marshal(status)
 	if token := client.Publish("clients/status", 0, false, payload); token.Wait() && token.Error() != nil {
 		fmt.Printf("Publish error: %v\n", token.Error())
@@ -84,6 +84,7 @@ func onFileStart(client MQTT.Client, msg MQTT.Message) {
 	var meta struct {
 		Filename    string `json:"filename"`
 		TotalChunks int    `json:"total_chunks"`
+		SHA256      string `json:"sha256"`
 	}
 	if err := json.Unmarshal(msg.Payload(), &meta); err != nil {
 		fmt.Printf("Error parsing file start: %v\n", err)
@@ -91,6 +92,7 @@ func onFileStart(client MQTT.Client, msg MQTT.Message) {
 	}
 	fileName = meta.Filename
 	totalChunks = meta.TotalChunks
+	expectedHash = meta.SHA256
 	fmt.Printf("Receiving file: %s (%d chunks)\n", fileName, totalChunks)
 }
 
@@ -121,6 +123,7 @@ func onFileEnd(client MQTT.Client, msg MQTT.Message) {
 	hash := sha256.New()
 	for i := 0; i < totalChunks; i++ {
 		if chunk, ok := tmpChunks[i]; ok {
+			fmt.Println("Writing chunk:", i)
 			f.Write(chunk)
 			hash.Write(chunk)
 		} else {
@@ -140,4 +143,10 @@ func onFileEnd(client MQTT.Client, msg MQTT.Message) {
 	}
 	ackPayload, _ := json.Marshal(ack)
 	mqttClient.Publish("clients/ack", 0, false, ackPayload)
+
+	if expectedHash != "" && sum != expectedHash {
+		fmt.Println("⚠️  Warning: Checksum does not match expected hash!")
+	} else {
+		fmt.Println("✅ Checksum verified.")
+	}
 }
