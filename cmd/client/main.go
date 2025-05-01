@@ -108,6 +108,7 @@ func onFileChunk(client MQTT.Client, msg MQTT.Message) {
 		fmt.Println("Invalid chunk index")
 		return
 	}
+	fmt.Println("Received chunk:", index)
 	tmpChunks[index] = []byte(parts[1])
 }
 

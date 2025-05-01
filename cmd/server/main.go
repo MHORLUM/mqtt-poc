@@ -203,35 +203,44 @@ func sendFileToAllClients(mqttClient MQTT.Client, filePath string) {
 	pendingAcks = make(map[string]string)
 	acksMu.Unlock()
 
+	var wg sync.WaitGroup
+
 	fmt.Printf("Uploading %s (%d chunks) to %d clients...\n", filename, totalChunks, len(clients))
 	for clientID := range clients {
-		fmt.Printf("Sending to [%s]...\n", clientID)
+		wg.Add(1)
+		go func(id string) {
+			defer wg.Done()
 
-		acksMu.Lock()
-		pendingAcks[clientID] = checksum
-		acksMu.Unlock()
+			fmt.Printf("Sending to [%s]...\n", id)
 
-		meta := map[string]interface{}{
-			"filename":     filename,
-			"total_chunks": totalChunks,
-			"sha256":       checksum,
-		}
-		payload, _ := json.Marshal(meta)
-		mqttClient.Publish(fmt.Sprintf("file/send/%s/start", clientID), 0, false, payload)
+			acksMu.Lock()
+			pendingAcks[id] = checksum
+			acksMu.Unlock()
 
-		for i := 0; i < totalChunks; i++ {
-			start := i * ChunkSize
-			end := start + ChunkSize
-			if end > len(data) {
-				end = len(data)
+			meta := map[string]interface{}{
+				"filename":     filename,
+				"total_chunks": totalChunks,
+				"sha256":       checksum,
 			}
-			chunk := data[start:end]
-			head := fmt.Sprintf("%d/", i)
-			mqttClient.Publish(fmt.Sprintf("file/send/%s/chunk", clientID), 0, false, append([]byte(head), chunk...))
-			time.Sleep(50 * time.Millisecond)
-		}
-		mqttClient.Publish(fmt.Sprintf("file/send/%s/end", clientID), 0, false, []byte("done"))
-		fmt.Printf("Finished sending to [%s]\n", clientID)
+			payload, _ := json.Marshal(meta)
+			mqttClient.Publish(fmt.Sprintf("file/send/%s/start", id), 0, false, payload)
+
+			for i := 0; i < totalChunks; i++ {
+				start := i * ChunkSize
+				end := start + ChunkSize
+				if end > len(data) {
+					end = len(data)
+				}
+				chunk := data[start:end]
+				head := fmt.Sprintf("%d/", i)
+				mqttClient.Publish(fmt.Sprintf("file/send/%s/chunk", id), 0, false, append([]byte(head), chunk...))
+				time.Sleep(50 * time.Millisecond)
+			}
+			mqttClient.Publish(fmt.Sprintf("file/send/%s/end", id), 0, false, []byte("done"))
+			fmt.Printf("Finished sending to [%s]\n", id)
+		}(clientID)
 	}
-	fmt.Println("Upload complete. Waiting for ACKs...")
+
+	wg.Wait()
+	fmt.Println("All uploads dispatched. Waiting for ACKs...")
 }
