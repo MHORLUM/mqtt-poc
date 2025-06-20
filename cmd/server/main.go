@@ -20,6 +20,7 @@ import (
 type ClientStatus struct {
 	ClientID  string `json:"client_id"`
 	Timestamp string `json:"timestamp"`
+	Count     int    `json:"count"`
 }
 
 type FileAck struct {
@@ -29,7 +30,7 @@ type FileAck struct {
 }
 
 var (
-	clients      = make(map[string]string)
+	clients      = make(map[string]ClientStatus) // เปลี่ยนจาก string เป็น ClientStatus
 	clientsMu    sync.RWMutex
 	pendingAcks  = make(map[string]string)
 	acksReceived = make(map[string]string)
@@ -43,8 +44,8 @@ func cleanupInactiveClients() {
 	for {
 		time.Sleep(5 * time.Second)
 		clientsMu.Lock()
-		for id, tsStr := range clients {
-			ts, _ := time.Parse(time.RFC3339, tsStr)
+		for id, status := range clients {
+			ts, _ := time.Parse(time.RFC3339, status.Timestamp)
 			if time.Since(ts) > InactiveThreshold {
 				delete(clients, id)
 				fmt.Printf("Removed inactive client: %s\n", id)
@@ -72,8 +73,12 @@ func main() {
 	if token := client.Subscribe("clients/ack", 0, handleAck); token.Wait() && token.Error() != nil {
 		panic(token.Error())
 	}
+	// Subscribe สำหรับ count acknowledgments
+	if token := client.Subscribe("clients/count_ack", 0, handleCountAck); token.Wait() && token.Error() != nil {
+		panic(token.Error())
+	}
 
-	fmt.Println("Server started. Commands: list, get [client_id], upload [file]")
+	fmt.Println("Server started. Commands: list, get [client_id], upload [file], count [client_id] [value]")
 	startCLI(client)
 }
 
@@ -84,7 +89,7 @@ func handleStatusUpdate(client MQTT.Client, msg MQTT.Message) {
 		return
 	}
 	clientsMu.Lock()
-	clients[status.ClientID] = status.Timestamp
+	clients[status.ClientID] = status
 	clientsMu.Unlock()
 }
 
@@ -117,6 +122,20 @@ func handleAck(_ MQTT.Client, msg MQTT.Message) {
 	}
 }
 
+func handleCountAck(_ MQTT.Client, msg MQTT.Message) {
+	var ack map[string]interface{}
+	if err := json.Unmarshal(msg.Payload(), &ack); err != nil {
+		fmt.Printf("Invalid count ACK: %v\n", err)
+		return
+	}
+
+	clientID, _ := ack["client_id"].(string)
+	count, _ := ack["count"].(float64) // JSON numbers เป็น float64
+	timestamp, _ := ack["timestamp"].(string)
+
+	fmt.Printf("Count ACK from [%s]: %d at %s ✅\n", clientID, int(count), timestamp)
+}
+
 func startCLI(mqttClient MQTT.Client) {
 	scanner := bufio.NewScanner(os.Stdin)
 	for {
@@ -132,8 +151,8 @@ func startCLI(mqttClient MQTT.Client) {
 		case "list":
 			clientsMu.RLock()
 			fmt.Println("\nConnected Clients:")
-			for id := range clients {
-				fmt.Println("-", id)
+			for id, status := range clients {
+				fmt.Printf("- %s (count: %d)\n", id, status.Count)
 			}
 			clientsMu.RUnlock()
 
@@ -153,13 +172,13 @@ func startCLI(mqttClient MQTT.Client) {
 				case <-ticker.C:
 					clientsMu.RLock()
 					if targetClient == "" {
-						fmt.Println("\n=== All Timestamps ===")
-						for id, ts := range clients {
-							fmt.Printf("- %s: %s\n", id, ts)
+						fmt.Println("\n=== All Client Status ===")
+						for id, status := range clients {
+							fmt.Printf("- %s: %s (count: %d)\n", id, status.Timestamp, status.Count)
 						}
 					} else {
-						if ts, ok := clients[targetClient]; ok {
-							fmt.Printf("\n[%s]: %s\n", targetClient, ts)
+						if status, ok := clients[targetClient]; ok {
+							fmt.Printf("\n[%s]: %s (count: %d)\n", targetClient, status.Timestamp, status.Count)
 						} else {
 							fmt.Printf("\nClient %s not found\n", targetClient)
 						}
@@ -178,8 +197,23 @@ func startCLI(mqttClient MQTT.Client) {
 			}
 			sendFileToAllClients(mqttClient, parts[1])
 
+		case "count":
+			if len(parts) < 2 {
+				fmt.Println("Usage: count [client_id] [value]")
+				continue
+			}
+			args := strings.Fields(parts[1])
+			if len(args) != 2 {
+				fmt.Println("Usage: count [client_id] [value]")
+				continue
+			}
+			targetClient := args[0]
+			value := args[1]
+			mqttClient.Publish(fmt.Sprintf("client/%s/count", targetClient), 0, false, value)
+			fmt.Printf("Sent count command to [%s]: %s\n", targetClient, value)
+
 		default:
-			fmt.Println("Invalid command. Available: list, get [client_id], upload [file]")
+			fmt.Println("Invalid command. Available: list, get [client_id], upload [file], count [client_id] [value]")
 		}
 	}
 }

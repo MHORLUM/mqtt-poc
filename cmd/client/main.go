@@ -21,6 +21,7 @@ import (
 type ClientStatus struct {
 	ClientID  string `json:"client_id"`
 	Timestamp string `json:"timestamp"`
+	Count     int    `json:"count"`
 }
 
 var (
@@ -30,6 +31,7 @@ var (
 	expectedHash string
 	mqttClient   MQTT.Client
 	clientID     string
+	count        int // เพิ่มตัวแปร count
 )
 
 func main() {
@@ -48,6 +50,8 @@ func main() {
 	mqttClient.Subscribe(fmt.Sprintf("file/send/%s/start", clientID), 1, onFileStart)
 	mqttClient.Subscribe(fmt.Sprintf("file/send/%s/chunk", clientID), 1, onFileChunk)
 	mqttClient.Subscribe(fmt.Sprintf("file/send/%s/end", clientID), 1, onFileEnd)
+	// Subscribe สำหรับ count command
+	mqttClient.Subscribe(fmt.Sprintf("client/%s/count", clientID), 1, onCountCommand)
 
 	sendUpdate(mqttClient, clientID)
 
@@ -72,6 +76,7 @@ func sendUpdate(client MQTT.Client, clientID string) {
 	status := ClientStatus{
 		ClientID:  clientID,
 		Timestamp: time.Now().Format(time.RFC3339),
+		Count:     count,
 	}
 	payload, _ := json.Marshal(status)
 	if token := client.Publish("clients/status", 0, false, payload); token.Wait() && token.Error() != nil {
@@ -94,6 +99,25 @@ func onFileStart(client MQTT.Client, msg MQTT.Message) {
 	totalChunks = meta.TotalChunks
 	expectedHash = meta.SHA256
 	fmt.Printf("Receiving file: %s (%d chunks)\n", fileName, totalChunks)
+}
+
+// Handler สำหรับ count command
+func onCountCommand(client MQTT.Client, msg MQTT.Message) {
+	val, err := strconv.Atoi(string(msg.Payload()))
+	if err != nil {
+		fmt.Printf("Invalid count command: %v\n", err)
+		return
+	}
+	count = val
+	fmt.Printf("Count updated to: %d\n", count)
+	// ส่งสถานะ count กลับไปที่ server
+	ack := map[string]interface{}{
+		"client_id": clientID,
+		"count":     count,
+		"timestamp": time.Now().Format(time.RFC3339),
+	}
+	ackPayload, _ := json.Marshal(ack)
+	mqttClient.Publish("clients/count_ack", 0, false, ackPayload)
 }
 
 func onFileChunk(client MQTT.Client, msg MQTT.Message) {
