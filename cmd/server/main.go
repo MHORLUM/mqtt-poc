@@ -90,7 +90,10 @@ func main() {
 		panic(token.Error())
 	}
 
-	fmt.Println("Server started. Commands: list, get [client_id], upload [file], count [client_id] [value], getcount [client_id], changeid [current_id] [new_id]")
+	fmt.Println("Server started. Available commands:")
+	fmt.Println("  count [value] - set count for all clients")
+	fmt.Println("  count [client_id] [value] - set count for specific client")
+	fmt.Println("  Type any invalid command to see full help")
 	startCLI(client)
 }
 
@@ -253,18 +256,49 @@ func startCLI(mqttClient MQTT.Client) {
 
 		case "count":
 			if len(parts) < 2 {
-				fmt.Println("Usage: count [client_id] [value]")
+				fmt.Println("Usage: count [client_id] [value] or count [value] (for all clients)")
 				continue
 			}
 			args := strings.Fields(parts[1])
-			if len(args) != 2 {
-				fmt.Println("Usage: count [client_id] [value]")
-				continue
+
+			if len(args) == 1 {
+				// ส่งไปยังทุก client
+				value := args[0]
+				clientsMu.RLock()
+				clientCount := len(clients)
+				if clientCount == 0 {
+					fmt.Println("No clients connected")
+					clientsMu.RUnlock()
+					continue
+				}
+
+				fmt.Printf("Sending count command to all %d clients: %s\n", clientCount, value)
+				for clientID := range clients {
+					mqttClient.Publish(fmt.Sprintf("client/%s/count", clientID), 0, false, value)
+					fmt.Printf("  -> Sent to [%s]\n", clientID)
+				}
+				clientsMu.RUnlock()
+
+			} else if len(args) == 2 {
+				// ส่งไปยัง client ที่ระบุ
+				targetClient := args[0]
+				value := args[1]
+
+				// ตรวจสอบว่า client นั้นมีอยู่จริงหรือไม่
+				clientsMu.RLock()
+				_, exists := clients[targetClient]
+				clientsMu.RUnlock()
+
+				if !exists {
+					fmt.Printf("Client [%s] not found or not connected\n", targetClient)
+					continue
+				}
+
+				mqttClient.Publish(fmt.Sprintf("client/%s/count", targetClient), 0, false, value)
+				fmt.Printf("Sent count command to [%s]: %s\n", targetClient, value)
+			} else {
+				fmt.Println("Usage: count [client_id] [value] or count [value] (for all clients)")
 			}
-			targetClient := args[0]
-			value := args[1]
-			mqttClient.Publish(fmt.Sprintf("client/%s/count", targetClient), 0, false, value)
-			fmt.Printf("Sent count command to [%s]: %s\n", targetClient, value)
 
 		case "getcount":
 			if len(parts) < 2 {
@@ -328,7 +362,14 @@ func startCLI(mqttClient MQTT.Client) {
 			fmt.Printf("Sent change ID request to [%s] -> [%s]\n", currentClientID, newClientID)
 
 		default:
-			fmt.Println("Invalid command. Available: list, get [client_id], upload [file], count [client_id] [value], getcount [client_id], changeid [current_id] [new_id]")
+			fmt.Println("Invalid command. Available:")
+			fmt.Println("  list - show all connected clients")
+			fmt.Println("  get [client_id] - show specific client info")
+			fmt.Println("  upload [file] - send file to all clients")
+			fmt.Println("  count [value] - set count for all clients")
+			fmt.Println("  count [client_id] [value] - set count for specific client")
+			fmt.Println("  getcount [client_id] - get current count from client")
+			fmt.Println("  changeid [current_id] [new_id] - change client ID")
 		}
 	}
 }
