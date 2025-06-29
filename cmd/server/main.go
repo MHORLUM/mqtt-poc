@@ -37,18 +37,22 @@ var (
 	acksMu       sync.Mutex
 )
 
-const InactiveThreshold = 10 * time.Second
-const ChunkSize = 64 * 1024 // 64KB
+const InactiveThreshold = 30 * time.Second // เพิ่มจาก 10 เป็น 30 วินาที
+const ChunkSize = 64 * 1024                // 64KB
 
 func cleanupInactiveClients() {
 	for {
-		time.Sleep(5 * time.Second)
+		time.Sleep(10 * time.Second) // เปลี่ยนจาก 5 เป็น 10 วินาที
 		clientsMu.Lock()
 		for id, status := range clients {
 			ts, _ := time.Parse(time.RFC3339, status.Timestamp)
-			if time.Since(ts) > InactiveThreshold {
+			timeSince := time.Since(ts)
+			if timeSince > InactiveThreshold {
 				delete(clients, id)
-				fmt.Printf("Removed inactive client: %s\n", id)
+				fmt.Printf("Removed inactive client: %s (last seen: %v ago)\n", id, timeSince.Round(time.Second))
+			} else if timeSince > InactiveThreshold/2 {
+				// เตือนเมื่อ client ไม่ส่ง heartbeat มาครึ่งหนึ่งของ threshold
+				fmt.Printf("Warning: Client %s hasn't sent heartbeat for %v\n", id, timeSince.Round(time.Second))
 			}
 		}
 		clientsMu.Unlock()
