@@ -5,9 +5,13 @@ services:
     ports:
       - "1883:1883"    # MQTT TCP
       - "8883:8883"    # MQTT SSL (optional)
+      - "8083:8083"    # HTTP API
       - "18083:18083"  # Dashboard
     environment:
       - EMQX_NAME=emqx
       - EMQX_LISTENER__TCP__EXTERNAL=1883
+      - EMQX_LISTENER__WS__EXTERNAL=8083
+      - EMQX_LISTENER__WS__EXTERNAL__ACCEPTORS=64
+      - EMQX_LISTENER__WS__EXTERNAL__MAX_CLIENTS=100000
       - EMQX_DASHBOARD__DEFAULT_USER__PASSWORD=public
     restart: unless-stopped
