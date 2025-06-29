@@ -77,8 +77,16 @@ func main() {
 	if token := client.Subscribe("clients/count_ack", 0, handleCountAck); token.Wait() && token.Error() != nil {
 		panic(token.Error())
 	}
+	// Subscribe สำหรับ get count response
+	if token := client.Subscribe("clients/get_count_response", 0, handleGetCountResponse); token.Wait() && token.Error() != nil {
+		panic(token.Error())
+	}
+	// Subscribe สำหรับ client ID change confirmation
+	if token := client.Subscribe("clients/change_id_response", 0, handleClientIDChanged); token.Wait() && token.Error() != nil {
+		panic(token.Error())
+	}
 
-	fmt.Println("Server started. Commands: list, get [client_id], upload [file], count [client_id] [value]")
+	fmt.Println("Server started. Commands: list, get [client_id], upload [file], count [client_id] [value], getcount [client_id], changeid [current_id] [new_id]")
 	startCLI(client)
 }
 
@@ -134,6 +142,48 @@ func handleCountAck(_ MQTT.Client, msg MQTT.Message) {
 	timestamp, _ := ack["timestamp"].(string)
 
 	fmt.Printf("Count ACK from [%s]: %d at %s ✅\n", clientID, int(count), timestamp)
+}
+
+func handleGetCountResponse(_ MQTT.Client, msg MQTT.Message) {
+	var response map[string]interface{}
+	if err := json.Unmarshal(msg.Payload(), &response); err != nil {
+		fmt.Printf("Invalid get count response: %v\n", err)
+		return
+	}
+
+	clientID, _ := response["client_id"].(string)
+	count, _ := response["count"].(float64) // JSON numbers เป็น float64
+	timestamp, _ := response["timestamp"].(string)
+
+	fmt.Printf("Current count from [%s]: %d (updated at %s)\n", clientID, int(count), timestamp)
+}
+
+func handleClientIDChanged(_ MQTT.Client, msg MQTT.Message) {
+	var response map[string]interface{}
+	if err := json.Unmarshal(msg.Payload(), &response); err != nil {
+		fmt.Printf("Invalid client ID change response: %v\n", err)
+		return
+	}
+
+	oldClientID, _ := response["old_client_id"].(string)
+	newClientID, _ := response["new_client_id"].(string)
+	status, _ := response["status"].(string)
+
+	if status == "success" {
+		// อัพเดท client list
+		clientsMu.Lock()
+		if clientStatus, exists := clients[oldClientID]; exists {
+			// คัดลอก status ไปยัง client ID ใหม่
+			clientStatus.ClientID = newClientID
+			clients[newClientID] = clientStatus
+			delete(clients, oldClientID)
+		}
+		clientsMu.Unlock()
+
+		fmt.Printf("Client ID changed successfully: [%s] -> [%s] ✅\n", oldClientID, newClientID)
+	} else {
+		fmt.Printf("Client ID change failed for [%s]: %v ❌\n", oldClientID, response["error"])
+	}
 }
 
 func startCLI(mqttClient MQTT.Client) {
@@ -212,8 +262,69 @@ func startCLI(mqttClient MQTT.Client) {
 			mqttClient.Publish(fmt.Sprintf("client/%s/count", targetClient), 0, false, value)
 			fmt.Printf("Sent count command to [%s]: %s\n", targetClient, value)
 
+		case "getcount":
+			if len(parts) < 2 {
+				fmt.Println("Usage: getcount [client_id]")
+				continue
+			}
+			targetClient := strings.TrimSpace(parts[1])
+
+			// ตรวจสอบว่า client นั้นมีอยู่จริงหรือไม่
+			clientsMu.RLock()
+			_, exists := clients[targetClient]
+			clientsMu.RUnlock()
+
+			if !exists {
+				fmt.Printf("Client [%s] not found or not connected\n", targetClient)
+				continue
+			}
+
+			mqttClient.Publish(fmt.Sprintf("client/%s/get_count", targetClient), 0, false, "")
+			fmt.Printf("Requesting current count from [%s]...\n", targetClient)
+
+		case "changeid":
+			if len(parts) < 2 {
+				fmt.Println("Usage: changeid [current_client_id] [new_client_id]")
+				continue
+			}
+			args := strings.Fields(parts[1])
+			if len(args) != 2 {
+				fmt.Println("Usage: changeid [current_client_id] [new_client_id]")
+				continue
+			}
+			currentClientID := args[0]
+			newClientID := args[1]
+
+			// ตรวจสอบว่า current client มีอยู่จริงหรือไม่
+			clientsMu.RLock()
+			_, exists := clients[currentClientID]
+			clientsMu.RUnlock()
+
+			if !exists {
+				fmt.Printf("Client [%s] not found or not connected\n", currentClientID)
+				continue
+			}
+
+			// ตรวจสอบว่า new client ID ยังไม่ได้ใช้
+			clientsMu.RLock()
+			_, newExists := clients[newClientID]
+			clientsMu.RUnlock()
+
+			if newExists {
+				fmt.Printf("Client ID [%s] is already in use\n", newClientID)
+				continue
+			}
+
+			// ส่งคำสั่งเปลี่ยน client ID
+			changeRequest := map[string]string{
+				"new_client_id": newClientID,
+			}
+			payload, _ := json.Marshal(changeRequest)
+			mqttClient.Publish(fmt.Sprintf("client/%s/change_id", currentClientID), 0, false, payload)
+			fmt.Printf("Sent change ID request to [%s] -> [%s]\n", currentClientID, newClientID)
+
 		default:
-			fmt.Println("Invalid command. Available: list, get [client_id], upload [file], count [client_id] [value]")
+			fmt.Println("Invalid command. Available: list, get [client_id], upload [file], count [client_id] [value], getcount [client_id], changeid [current_id] [new_id]")
 		}
 	}
 }

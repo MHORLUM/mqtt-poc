@@ -52,6 +52,10 @@ func main() {
 	mqttClient.Subscribe(fmt.Sprintf("file/send/%s/end", clientID), 1, onFileEnd)
 	// Subscribe สำหรับ count command
 	mqttClient.Subscribe(fmt.Sprintf("client/%s/count", clientID), 1, onCountCommand)
+	// Subscribe สำหรับ get count request
+	mqttClient.Subscribe(fmt.Sprintf("client/%s/get_count", clientID), 1, onGetCountRequest)
+	// Subscribe สำหรับ change ID request
+	mqttClient.Subscribe(fmt.Sprintf("client/%s/change_id", clientID), 1, onChangeIDRequest)
 
 	sendUpdate(mqttClient, clientID)
 
@@ -118,6 +122,79 @@ func onCountCommand(client MQTT.Client, msg MQTT.Message) {
 	}
 	ackPayload, _ := json.Marshal(ack)
 	mqttClient.Publish("clients/count_ack", 0, false, ackPayload)
+}
+
+// Handler สำหรับ get count request
+func onGetCountRequest(client MQTT.Client, msg MQTT.Message) {
+	fmt.Printf("Server requested current count\n")
+	// ส่งค่า count ปัจจุบันกลับไปที่ server
+	response := map[string]interface{}{
+		"client_id": clientID,
+		"count":     count,
+		"timestamp": time.Now().Format(time.RFC3339),
+	}
+	responsePayload, _ := json.Marshal(response)
+	mqttClient.Publish("clients/get_count_response", 0, false, responsePayload)
+	fmt.Printf("Sent current count (%d) to server\n", count)
+}
+
+// Handler สำหรับ change ID request
+func onChangeIDRequest(client MQTT.Client, msg MQTT.Message) {
+	var request map[string]string
+	if err := json.Unmarshal(msg.Payload(), &request); err != nil {
+		fmt.Printf("Invalid change ID request: %v\n", err)
+		return
+	}
+
+	newClientID, exists := request["new_client_id"]
+	if !exists {
+		fmt.Println("Change ID request missing new_client_id")
+		return
+	}
+
+	oldClientID := clientID
+
+	// ส่งการยืนยันกลับไปยัง server
+	response := map[string]interface{}{
+		"old_client_id": oldClientID,
+		"new_client_id": newClientID,
+		"status":        "success",
+	}
+
+	responsePayload, _ := json.Marshal(response)
+	client.Publish("clients/change_id_response", 0, false, responsePayload)
+
+	fmt.Printf("Changing client ID from [%s] to [%s]...\n", oldClientID, newClientID)
+
+	// Disconnect และ reconnect ด้วย client ID ใหม่
+	client.Disconnect(250)
+
+	// เปลี่ยน client ID
+	clientID = newClientID
+
+	// สร้าง connection ใหม่
+	opts := MQTT.NewClientOptions().AddBroker("tcp://localhost:1883")
+	opts.SetClientID(clientID)
+	opts.SetWill("clients/disconnected", clientID, 0, false)
+
+	mqttClient = MQTT.NewClient(opts)
+	if token := mqttClient.Connect(); token.Wait() && token.Error() != nil {
+		fmt.Printf("Failed to reconnect with new ID: %v\n", token.Error())
+		return
+	}
+
+	// Subscribe ใหม่ด้วย client ID ใหม่
+	mqttClient.Subscribe(fmt.Sprintf("file/send/%s/start", clientID), 1, onFileStart)
+	mqttClient.Subscribe(fmt.Sprintf("file/send/%s/chunk", clientID), 1, onFileChunk)
+	mqttClient.Subscribe(fmt.Sprintf("file/send/%s/end", clientID), 1, onFileEnd)
+	mqttClient.Subscribe(fmt.Sprintf("client/%s/count", clientID), 1, onCountCommand)
+	mqttClient.Subscribe(fmt.Sprintf("client/%s/get_count", clientID), 1, onGetCountRequest)
+	mqttClient.Subscribe(fmt.Sprintf("client/%s/change_id", clientID), 1, onChangeIDRequest)
+
+	// ส่ง status update ด้วย client ID ใหม่
+	sendUpdate(mqttClient, clientID)
+
+	fmt.Printf("Successfully changed to client ID: [%s] ✅\n", clientID)
 }
 
 func onFileChunk(client MQTT.Client, msg MQTT.Message) {
